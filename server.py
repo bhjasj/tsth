@@ -1,7 +1,7 @@
 import json
 import os
 import requests
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -9,6 +9,7 @@ load_dotenv()
 TOKEN         = os.getenv("DISCORD_TOKEN")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 BASE_URL      = os.getenv("BASE_URL")
+API_SECRET    = os.getenv("API_SECRET")   # a password only your bot knows
 CLIENT_ID     = 1502467961636520046
 TOKENS_FILE   = "tokens.json"
 
@@ -27,6 +28,26 @@ def save_tokens(store):
         json.dump(store, f, indent=2)
 
 
+# ─── Internal API: bot fetches tokens from here ───────────────────────────────
+@app.route("/tokens")
+def get_tokens():
+    # Require the secret header so random people can't access tokens
+    if request.headers.get("X-API-Secret") != API_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(load_tokens())
+
+
+@app.route("/tokens/<user_id>")
+def get_token(user_id):
+    if request.headers.get("X-API-Secret") != API_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+    store = load_tokens()
+    if user_id not in store:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(store[user_id])
+
+
+# ─── OAuth2 callback ──────────────────────────────────────────────────────────
 @app.route("/callback")
 def callback():
     code  = request.args.get("code")
@@ -42,7 +63,6 @@ def callback():
     except ValueError:
         return "❌ Invalid state parameter.", 400
 
-    # Exchange code for tokens
     token_resp = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
@@ -66,7 +86,6 @@ def callback():
     if not access_token:
         return "❌ No access token returned.", 500
 
-    # Get user info
     user_resp = requests.get(
         "https://discord.com/api/users/@me",
         headers={"Authorization": f"Bearer {access_token}"},
@@ -78,7 +97,6 @@ def callback():
     user_id   = int(user_data["id"])
     username  = user_data.get("username", str(user_id))
 
-    # Save tokens
     store = load_tokens()
     store[str(user_id)] = {
         "access_token":  access_token,
@@ -88,7 +106,6 @@ def callback():
     save_tokens(store)
     print(f"[TOKEN] Stored tokens for {username} ({user_id})")
 
-    # Add user to guild with role
     join_resp = requests.put(
         f"https://discord.com/api/guilds/{guild_id}/members/{user_id}",
         headers={"Authorization": f"Bot {TOKEN}", "Content-Type": "application/json"},
@@ -96,7 +113,6 @@ def callback():
     )
 
     if join_resp.status_code == 204:
-        # Already in server, assign role separately
         requests.put(
             f"https://discord.com/api/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
             headers={"Authorization": f"Bot {TOKEN}"},
@@ -155,4 +171,6 @@ if __name__ == "__main__":
         raise ValueError("CLIENT_SECRET not set in .env")
     if not BASE_URL:
         raise ValueError("BASE_URL not set in .env")
+    if not API_SECRET:
+        raise ValueError("API_SECRET not set in .env")
     app.run(host="0.0.0.0", port=5000, debug=False)
